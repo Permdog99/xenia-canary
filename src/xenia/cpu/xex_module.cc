@@ -197,10 +197,10 @@ uint32_t XexModule::GetProcAddress(const std::string_view name) const {
   return 0;
 }
 
-int XexModule::ApplyPatch(XexModule* module) {
+bool XexModule::IsPatchApplicable(XexModule* module) {
   if (!is_patch()) {
     // This isn't a XEX2 patch.
-    return 1;
+    return false;
   }
 
   // Grab the delta descriptor and get to work.
@@ -219,7 +219,22 @@ int XexModule::ApplyPatch(XexModule* module) {
     XELOGW(
         "XEX patch signature hash doesn't match base XEX signature hash, patch "
         "will likely fail!");
+    return false;
   }
+
+  return true;
+}
+
+int XexModule::ApplyPatch(XexModule* module) {
+  if (!IsPatchApplicable(module)) {
+    return 1;
+  }
+
+  // Grab the delta descriptor and get to work.
+  xex2_opt_delta_patch_descriptor* patch_header = nullptr;
+  GetOptHeader(XEX_HEADER_DELTA_PATCH_DESCRIPTOR,
+               reinterpret_cast<void**>(&patch_header));
+  assert_not_null(patch_header);
 
   uint32_t size = module->xex_header()->header_size;
   if (patch_header->delta_headers_source_offset > size) {
@@ -250,11 +265,13 @@ int XexModule::ApplyPatch(XexModule* module) {
   // Patch base XEX header
   uint32_t original_image_size = module->image_size();
   uint32_t header_target_size = patch_header->delta_headers_target_offset +
-                                patch_header->delta_headers_source_size;
+                                patch_header->size_of_target_headers;
 
-  if (!header_target_size) {
-    header_target_size =
-        patch_header->size_of_target_headers;  // unsure which is more correct..
+  if (!patch_header->size_of_target_headers) {
+    // size_of_target_headers seems to be the most correct value
+    // but if that's not set we'll fall back to delta_headers_source_size
+    header_target_size = patch_header->delta_headers_target_offset +
+                         patch_header->delta_headers_source_size;
   }
 
   size_t mem_size = module->xex_header_mem_.size();
@@ -400,6 +417,9 @@ int XexModule::ApplyPatch(XexModule* module) {
   }
 
   // Now loop through each block and apply the delta patches inside
+  uint8_t digest[0x14];
+  sha1::SHA1 s;
+
   while (cur_block->block_size) {
     const auto* next_block = (const xex2_compressed_block_info*)p;
 
@@ -449,14 +469,9 @@ int XexModule::ApplyPatch(XexModule* module) {
       }
     }
 
-    // byteswap versions because of bitfields...
     xex2_version source_ver, target_ver;
-    source_ver.value =
-        xe::byte_swap<uint32_t>(patch_header->source_version.value);
-
-    target_ver.value =
-        xe::byte_swap<uint32_t>(patch_header->target_version.value);
-
+    source_ver = patch_header->source_version();
+    target_ver = patch_header->target_version();
     XELOGI(
         "XEX patch applied successfully: base version: {}.{}.{}.{}, new "
         "version: {}.{}.{}.{}",
@@ -922,8 +937,6 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
   // Read/convert XEX1/XEX2 security info to a common format
   ReadSecurityInfo();
 
-  auto sec_header = xex_security_info();
-
   // Try setting our base_address based on XEX_HEADER_IMAGE_BASE_ADDRESS, fall
   // back to xex_security_info otherwise
   base_address_ = xex_security_info()->load_address;
@@ -935,7 +948,11 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
   name_ = name;
   path_ = path;
 
-  uint8_t* data = memory()->TranslateVirtual(base_address_);
+  if (!xex_length) {
+    // No more loading can be performed if xex_length is empty
+    // (return true though as we can still read headers)
+    return true;
+  }
 
   // Load in the XEX basefile
   // We'll try using both XEX2 keys to see if any give a valid PE
@@ -970,6 +987,16 @@ bool XexModule::LoadContinue() {
   if (ReadPEHeaders()) {
     XELOGE("Failed to load XEX PE headers!");
     return false;
+  }
+
+  // Parse any "unsafe" headers into safer variants
+  xex2_opt_generic_u32* alternate_titleids;
+  if (GetOptHeader(xex2_header_keys::XEX_HEADER_ALTERNATE_TITLE_IDS,
+                   &alternate_titleids)) {
+    auto count = alternate_titleids->count();
+    for (uint32_t i = 0; i < count; i++) {
+      opt_alternate_title_ids_.push_back(alternate_titleids->values[i]);
+    }
   }
 
   // Scan and find the low/high addresses.
@@ -1112,8 +1139,8 @@ bool XexModule::SetupLibraryImports(const std::string_view name,
   ImportLibrary library_info;
   library_info.name = base_name;
   library_info.id = library->id;
-  library_info.version.value = library->version.value;
-  library_info.min_version.value = library->version_min.value;
+  library_info.version.value = library->version().value;
+  library_info.min_version.value = library->version_min().value;
 
   // Imports are stored as {import descriptor, thunk addr, import desc, ...}
   // Even thunks have an import descriptor (albeit unused/useless)

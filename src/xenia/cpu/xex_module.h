@@ -103,6 +103,10 @@ class XexModule : public xe::cpu::Module {
     return retval;
   }
 
+  std::vector<uint32_t> opt_alternate_title_ids() const {
+    return opt_alternate_title_ids_;
+  }
+
   const uint32_t base_address() const { return base_address_; }
   const bool is_dev_kit() const { return is_dev_kit_; }
 
@@ -134,7 +138,9 @@ class XexModule : public xe::cpu::Module {
   uint32_t GetProcAddress(uint16_t ordinal) const;
   uint32_t GetProcAddress(const std::string_view name) const;
 
+  bool IsPatchApplicable(XexModule* module);
   int ApplyPatch(XexModule* module);
+
   bool Load(const std::string_view name, const std::string_view path,
             const void* xex_addr, size_t xex_length);
   bool LoadContinue();
@@ -193,6 +199,9 @@ class XexModule : public xe::cpu::Module {
   std::vector<ImportLibrary>
       import_libs_;  // pre-loaded import libraries for ease of use
   std::vector<PESection> pe_sections_;
+
+  // XEX_HEADER_ALTERNATE_TITLE_IDS loaded into a safe std::vector
+  std::vector<uint32_t> opt_alternate_title_ids_;
 
   uint8_t session_key_[0x10];
   bool is_dev_kit_ = false;
